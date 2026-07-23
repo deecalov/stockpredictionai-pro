@@ -451,7 +451,7 @@ class TestBuildLocalPanel:
         assert "GMKN" in panel.columns
 
     def test_has_indicators(self):
-        panel = build_local_panel(_make_panel_cfg())
+        panel = build_local_panel(_make_panel_cfg(use_indicators=True))
         expected = ["sma7", "sma21", "ema21", "macd", "macd_signal",
                     "macd_hist", "bb_upper", "bb_mid", "bb_lower",
                     "rsi14", "mom10", "log_mom10"]
@@ -485,7 +485,8 @@ class TestBuildLocalPanel:
         assert len(panel_m5) < len(panel_m1)
 
     def test_m14_timeframe(self):
-        panel = build_local_panel(_make_panel_cfg(timeframe="M14"))
+        panel = build_local_panel(_make_panel_cfg(timeframe="M14",
+                                                  use_indicators=True))
         assert len(panel) > 0
         assert "sma7" in panel.columns
 

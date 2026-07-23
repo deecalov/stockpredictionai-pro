@@ -153,8 +153,11 @@ def fit_transforms(train_feat: pd.DataFrame, test_feat: pd.DataFrame, cfg: Confi
 
     # Autoencoder (optional -- disabled when ae_epochs=0)
     if cfg.ae_epochs > 0:
-        ae_train, ae_model = fit_autoencoder(train_feat, hidden=cfg.ae_hidden,
-                                             bottleneck=cfg.ae_bottleneck, epochs=cfg.ae_epochs)
+        ae_train, ae_model = fit_autoencoder(
+            train_feat, hidden=cfg.ae_hidden,
+            bottleneck=cfg.ae_bottleneck, epochs=cfg.ae_epochs,
+            variant=getattr(cfg, "ae_variant", "stacked"),
+            xavier_init=getattr(cfg, "use_xavier_init", True))
         ae_test = transform_autoencoder(test_feat, ae_model)
         train_all = train_all.join(ae_train)
         test_all = test_all.join(ae_test)
@@ -201,8 +204,11 @@ def _build_gan(cfg, input_size, seq_len):
         cls_weight=cfg.cls_weight, q_weight=cfg.q_weight,
         use_lr_scheduler=cfg.use_lr_scheduler,
         lr_scheduler_min_factor=cfg.lr_scheduler_min_factor,
+        lr_scheduler_type=getattr(cfg, "lr_scheduler_type", "cosine"),
+        lr_cycle_length=getattr(cfg, "lr_cycle_length", 0),
         n_epochs=cfg.n_epochs,
         grad_clip=cfg.grad_clip,
+        use_xavier_init=getattr(cfg, "use_xavier_init", True),
     )
 
 
@@ -239,14 +245,23 @@ def _build_model(cfg, input_size, seq_len, col_names=None):
         raise ValueError(f"Unknown model_type: {mt}")
 
 
-def evaluate_model(model, Xte, yte, batch, quantiles=(0.1, 0.5, 0.9)):
-    """Run inference on any PredictionModel, return predictions, logits, and quantiles."""
+def evaluate_model(model, Xte, yte, batch, quantiles=(0.1, 0.5, 0.9),
+                   use_mhgan=False, mhgan_k=32):
+    """Run inference on any PredictionModel, return predictions, logits, and quantiles.
+
+    When use_mhgan=True and the model supports it (WGAN_GP), applies
+    Metropolis-Hastings sampling over mhgan_k generator samples per input.
+    """
     te_ds = TensorDataset(torch.tensor(Xte))
     te_dl = DataLoader(te_ds, batch_size=batch, shuffle=False)
+    mhgan = use_mhgan and hasattr(model, "predict_mhgan")
     y_pred_list, y_logit_list, y_q_list = [], [], []
     with torch.no_grad():
         for (xb,) in te_dl:
-            y_reg, y_cls, y_q = model.predict(xb)
+            if mhgan:
+                y_reg, y_cls, y_q = model.predict_mhgan(xb, k=mhgan_k)
+            else:
+                y_reg, y_cls, y_q = model.predict(xb)
             y_pred_list.append(y_reg.numpy())
             y_logit_list.append(y_cls.numpy())
             y_q_list.append(y_q.numpy())
@@ -403,7 +418,10 @@ def run_one_split(train_df, test_df, cfg, verbose=False,
                          col_names=col_names)
 
     train_with_early_stop(model, tr_dl, Xte, yte, cfg, verbose=verbose)
-    y_pred, y_logit, y_q = evaluate_model(model, Xte, yte, cfg.batch_size, cfg.quantiles)
+    y_pred, y_logit, y_q = evaluate_model(
+        model, Xte, yte, cfg.batch_size, cfg.quantiles,
+        use_mhgan=getattr(cfg, "use_mhgan", False),
+        mhgan_k=getattr(cfg, "mhgan_k", 32))
 
     if is_multi_out:
         met = multi_horizon_metrics(yte, y_pred, horizons)
@@ -450,6 +468,14 @@ def main():
     parser.add_argument('--data_path', default='', help='Path to local data hierarchy')
     parser.add_argument('--raw_source', default='m1', choices=['m1', 'ticks'],
                         help='Local raw data source: m1 (M1 bars) or ticks (tick data)')
+    parser.add_argument('--mhgan', action='store_true',
+                        help='MHGAN inference: Metropolis-Hastings sampling via trained critic')
+    parser.add_argument('--mhgan_k', type=int, default=None,
+                        help='Number of generator samples per input for MHGAN')
+    parser.add_argument('--lr_scheduler', default=None, choices=['cosine', 'triangular'],
+                        help='LR scheduler type')
+    parser.add_argument('--ae_variant', default=None, choices=['stacked', 'vae'],
+                        help='Autoencoder variant (used when ae_epochs > 0)')
     parser.add_argument('--seq_len', type=int, default=None, help='Override seq_len')
     parser.add_argument('--lr_g', type=float, default=None, help='Override lr_g')
     parser.add_argument('--lr_d', type=float, default=None, help='Override lr_d')
@@ -479,6 +505,14 @@ def main():
         cfg.cls_weight = args.cls_weight
     if args.q_weight is not None:
         cfg.q_weight = args.q_weight
+    if args.mhgan:
+        cfg.use_mhgan = True
+    if args.mhgan_k is not None:
+        cfg.mhgan_k = args.mhgan_k
+    if args.lr_scheduler is not None:
+        cfg.lr_scheduler_type = args.lr_scheduler
+    if args.ae_variant is not None:
+        cfg.ae_variant = args.ae_variant
     if cfg.data_source == "local" or cfg.timeframe != "D1":
         cfg.apply_timeframe_defaults()
     set_global_seed(args.seed, deterministic=cfg.deterministic)
@@ -550,8 +584,11 @@ def main():
                              col_names=col_names)
         train_with_early_stop(model, tr_dl, Xte, yte, cfg, verbose=True)
 
-        print("[7/7] Evaluating on test set...")
-        y_pred, y_logit, y_q = evaluate_model(model, Xte, yte, cfg.batch_size, cfg.quantiles)
+        print("[7/7] Evaluating on test set..."
+              + (f" (MHGAN, k={cfg.mhgan_k})" if cfg.use_mhgan else ""))
+        y_pred, y_logit, y_q = evaluate_model(
+            model, Xte, yte, cfg.batch_size, cfg.quantiles,
+            use_mhgan=cfg.use_mhgan, mhgan_k=cfg.mhgan_k)
 
         met = compute_metrics(yte, y_pred, y_q, cfg.quantiles)
         print(f"  MAE={met['MAE']:.4f}  MAPE={met['MAPE']:.4f}  "

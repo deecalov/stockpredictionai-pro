@@ -152,6 +152,8 @@ class Config:
     ae_hidden: int = 64
     ae_bottleneck: int = 32
     ae_epochs: int = 0          # Round 1 ablation: AE adds noise (MAE improves when off)
+    # Autoencoder variant: "stacked" (deterministic) | "vae" (variational, KL term)
+    ae_variant: str = "stacked"
 
     pca_components: int = 12
 
@@ -160,9 +162,19 @@ class Config:
     # Gradient clipping (max norm for generator gradients; 0 = disabled)
     grad_clip: float = 1.0
 
-    # Learning rate scheduler (Cyclical)
+    # Learning rate scheduler: "cosine" (annealing) | "triangular" (cyclical)
     use_lr_scheduler: bool = True
+    lr_scheduler_type: str = "cosine"
     lr_scheduler_min_factor: float = 0.1  # min_lr = lr * factor
+    lr_cycle_length: int = 0    # triangular cycle length in epochs; 0 = auto (n_epochs // 2)
+
+    # Xavier (Glorot) weight initialization for G/D and autoencoder
+    use_xavier_init: bool = True
+
+    # MHGAN inference: Metropolis-Hastings sampling over k generator samples,
+    # filtered by the trained critic (applied to final test evaluation only)
+    use_mhgan: bool = False
+    mhgan_k: int = 32
 
     # Early stopping
     early_stopping_patience: int = 5

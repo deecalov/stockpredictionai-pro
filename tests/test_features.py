@@ -176,3 +176,44 @@ def test_fourier_fit_transform_extrapolation():
     result = transform_fourier(longer_index, state)
     assert len(result) == 150
     assert np.isfinite(result.values).all()
+
+
+# --- VAE variant ---
+
+def test_vae_fit_transform_shapes(sample_panel):
+    from src.features.autoencoder import (fit_autoencoder, transform_autoencoder,
+                                          VariationalAutoencoder)
+    df = sample_panel.iloc[:200]
+    ae_df, model = fit_autoencoder(df, hidden=32, bottleneck=16, epochs=2,
+                                   variant="vae")
+    assert isinstance(model, VariationalAutoencoder)
+    assert ae_df.shape == (200, 16)
+    assert all(c.startswith("ae_") for c in ae_df.columns)
+    ae_test = transform_autoencoder(df.iloc[:50], model)
+    assert ae_test.shape == (50, 16)
+    assert np.isfinite(ae_test.values).all()
+
+
+def test_vae_transform_deterministic(sample_panel):
+    """Inference uses mu (not sampled z), so repeated transforms must match."""
+    from src.features.autoencoder import fit_autoencoder, transform_autoencoder
+    df = sample_panel.iloc[:100]
+    _, model = fit_autoencoder(df, hidden=16, bottleneck=8, epochs=1, variant="vae")
+    z1 = transform_autoencoder(df, model)
+    z2 = transform_autoencoder(df, model)
+    np.testing.assert_array_almost_equal(z1.values, z2.values)
+
+
+def test_stacked_variant_is_default(sample_panel):
+    from src.features.autoencoder import fit_autoencoder, StackedAutoencoder
+    df = sample_panel.iloc[:100]
+    _, model = fit_autoencoder(df, hidden=16, bottleneck=8, epochs=1)
+    assert isinstance(model, StackedAutoencoder)
+
+
+def test_autoencoder_invalid_variant(sample_panel):
+    import pytest
+    from src.features.autoencoder import fit_autoencoder
+    df = sample_panel.iloc[:50]
+    with pytest.raises(ValueError, match="variant"):
+        fit_autoencoder(df, epochs=1, variant="bogus")

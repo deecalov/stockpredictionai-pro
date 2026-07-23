@@ -4,6 +4,30 @@ from typing import Tuple, Dict
 
 import numpy as np
 import torch
+from torch import nn
+
+
+def init_weights_xavier(module: nn.Module):
+    """Apply Xavier (Glorot) initialization, as in the source notebook (mx.init.Xavier).
+
+    Linear/Conv1d weights get xavier_uniform; LSTM input-hidden weights get
+    xavier_uniform and hidden-hidden weights get orthogonal init (standard
+    practice for recurrent weights). All biases are zeroed.
+    MultiheadAttention and BatchNorm already use suitable defaults in PyTorch.
+    """
+    for m in module.modules():
+        if isinstance(m, (nn.Linear, nn.Conv1d)):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LSTM):
+            for name, param in m.named_parameters():
+                if "weight_ih" in name:
+                    nn.init.xavier_uniform_(param)
+                elif "weight_hh" in name:
+                    nn.init.orthogonal_(param)
+                elif "bias" in name:
+                    nn.init.zeros_(param)
 
 
 class PredictionModel(ABC):

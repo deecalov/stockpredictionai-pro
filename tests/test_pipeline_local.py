@@ -61,6 +61,7 @@ class TestBuildPanelAuto:
 
     def test_local_panel_has_indicators(self):
         cfg = _local_config()
+        cfg.use_indicators = True
         panel = build_panel_auto(cfg)
         for col in ["sma7", "rsi14", "macd", "bb_upper"]:
             assert col in panel.columns

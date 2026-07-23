@@ -1,6 +1,7 @@
 import torch
 from torch import nn, autograd
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CyclicLR
+from .base import init_weights_xavier
 from .generator import LSTMGenerator, TransformerGenerator
 from .discriminator import CNNDiscriminator
 
@@ -49,7 +50,8 @@ class WGAN_GP:
                  quantiles=(0.1, 0.5, 0.9),
                  adv_weight=1.0, l1_weight=0.4, cls_weight=0.2, q_weight=0.3,
                  use_lr_scheduler=True, lr_scheduler_min_factor=0.1, n_epochs=20,
-                 grad_clip=1.0):
+                 lr_scheduler_type="cosine", lr_cycle_length=0,
+                 grad_clip=1.0, use_xavier_init=True):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.quantiles = quantiles
         self.adv_weight = adv_weight
@@ -73,6 +75,10 @@ class WGAN_GP:
             ).to(self.device)
 
         self.D = CNNDiscriminator(input_size, seq_len).to(self.device)
+
+        if use_xavier_init:
+            init_weights_xavier(self.G)
+            init_weights_xavier(self.D)
 
         # torch.compile with inductor backend requires Triton (Linux only as of 2025).
         # On Windows or when Triton is missing, skip compilation silently.
@@ -98,14 +104,31 @@ class WGAN_GP:
         self._amp_enabled = _is_cuda
         self.scaler = torch.amp.GradScaler(self.device, enabled=self._amp_enabled)
 
-        # Learning rate schedulers (CosineAnnealing: decays to eta_min then restarts)
+        # Learning rate schedulers, stepped once per epoch:
+        #   "cosine"     -- CosineAnnealing decay to eta_min (default)
+        #   "triangular" -- cyclical triangular schedule (min -> max -> min),
+        #                   as in the source notebook's TriangularSchedule
         self.sched_g = None
         self.sched_d = None
         if use_lr_scheduler and n_epochs > 1:
             eta_min_g = lr_g * lr_scheduler_min_factor
             eta_min_d = lr_d * lr_scheduler_min_factor
-            self.sched_g = CosineAnnealingLR(self.opt_g, T_max=n_epochs, eta_min=eta_min_g)
-            self.sched_d = CosineAnnealingLR(self.opt_d, T_max=n_epochs, eta_min=eta_min_d)
+            if lr_scheduler_type == "triangular":
+                cycle = lr_cycle_length if lr_cycle_length > 0 else max(2, n_epochs // 2)
+                up = max(1, cycle // 2)
+                down = max(1, cycle - up)
+                self.sched_g = CyclicLR(self.opt_g, base_lr=eta_min_g, max_lr=lr_g,
+                                        step_size_up=up, step_size_down=down,
+                                        mode="triangular", cycle_momentum=False)
+                self.sched_d = CyclicLR(self.opt_d, base_lr=eta_min_d, max_lr=lr_d,
+                                        step_size_up=up, step_size_down=down,
+                                        mode="triangular", cycle_momentum=False)
+            elif lr_scheduler_type == "cosine":
+                self.sched_g = CosineAnnealingLR(self.opt_g, T_max=n_epochs, eta_min=eta_min_g)
+                self.sched_d = CosineAnnealingLR(self.opt_d, T_max=n_epochs, eta_min=eta_min_d)
+            else:
+                raise ValueError(f"Unknown lr_scheduler_type: {lr_scheduler_type!r} "
+                                 f"(use 'cosine' or 'triangular')")
 
     def step_schedulers(self):
         """Advance LR schedulers by one epoch. Safe to call even if schedulers are disabled."""
@@ -170,4 +193,62 @@ class WGAN_GP:
         with torch.no_grad():
             xb = xb.to(self.device)
             y_reg, y_logit, y_q = self.G(xb)
+        return y_reg.cpu(), y_logit.cpu(), y_q.cpu()
+
+    def predict_mhgan(self, xb, k=32):
+        """Metropolis-Hastings GAN inference (Uber MHGAN, arXiv:1811.11357).
+
+        Instead of discarding the critic after training, draws k stochastic
+        generator samples per input (noise is injected inside G.forward),
+        scores each with the trained critic, and runs a per-input
+        Metropolis-Hastings chain over the samples. Acceptance rule:
+        alpha = min(1, (1/p_cur - 1) / (1/p_new - 1)), where p are
+        probabilities obtained by per-input standardization of critic scores
+        through a sigmoid (the WGAN critic is uncalibrated, so this serves as
+        a pragmatic calibration).
+
+        Deviation from the paper: the chain starts from the first generated
+        sample rather than a real one, because real targets are unknown at
+        inference time.
+
+        Returns (y_reg [B], y_logit [B], y_q [B, Q]) on CPU, like predict().
+        """
+        self.G.eval()
+        self.D.eval()
+        with torch.no_grad():
+            xb = xb.to(self.device)
+            B = xb.size(0)
+            regs, logits, quants, scores = [], [], [], []
+            for _ in range(k):
+                y_reg, y_logit, y_q = self.G(xb)
+                scores.append(self.D(xb, y_reg))
+                regs.append(y_reg)
+                logits.append(y_logit)
+                quants.append(y_q)
+            regs = torch.stack(regs, dim=1)      # [B, k]
+            logits = torch.stack(logits, dim=1)  # [B, k]
+            quants = torch.stack(quants, dim=1)  # [B, k, Q]
+            scores = torch.stack(scores, dim=1)  # [B, k]
+
+            sel = torch.zeros(B, dtype=torch.long, device=xb.device)
+            if k > 1:
+                mean = scores.mean(dim=1, keepdim=True)
+                std = scores.std(dim=1, keepdim=True).clamp_min(1e-8)
+                p = torch.sigmoid((scores - mean) / std).clamp(1e-6, 1 - 1e-6)
+
+                u = torch.rand(B, k, device=xb.device)
+                for j in range(1, k):
+                    p_cur = p.gather(1, sel.unsqueeze(1)).squeeze(1)
+                    p_new = p[:, j]
+                    # min(1, alpha) is implicit: u ~ U[0,1), so u < alpha
+                    # always accepts when alpha >= 1
+                    alpha = ((1.0 - p_cur) * p_new) / ((1.0 - p_new) * p_cur)
+                    accept = u[:, j] < alpha
+                    sel = torch.where(accept, torch.full_like(sel, j), sel)
+
+            idx = sel.unsqueeze(1)
+            y_reg = regs.gather(1, idx).squeeze(1)
+            y_logit = logits.gather(1, idx).squeeze(1)
+            y_q = quants.gather(
+                1, idx.unsqueeze(2).expand(B, 1, quants.size(2))).squeeze(1)
         return y_reg.cpu(), y_logit.cpu(), y_q.cpu()

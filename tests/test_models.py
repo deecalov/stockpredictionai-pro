@@ -299,3 +299,118 @@ class TestCNNDiscriminatorEdgeCases:
         y = torch.randn(1)
         score = disc(x, y)
         assert score.shape == (1,)
+
+
+class TestXavierInit:
+    def test_biases_zeroed(self):
+        """Xavier init (default) zeroes all Linear/Conv/LSTM biases."""
+        gan = WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                      generator_type="lstm", use_lr_scheduler=False,
+                      use_xavier_init=True)
+        assert torch.all(gan.G.out_reg.bias == 0)
+        assert torch.all(gan.G.out_quantiles.bias == 0)
+        for name, p in gan.G.lstm.named_parameters():
+            if "bias" in name:
+                assert torch.all(p == 0), f"LSTM {name} not zeroed"
+        for m in gan.D.modules():
+            if isinstance(m, torch.nn.Linear) and m.bias is not None:
+                assert torch.all(m.bias == 0)
+
+    def test_disabled_keeps_torch_defaults(self):
+        """With use_xavier_init=False, PyTorch default (non-zero) biases remain."""
+        gan = WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                      generator_type="lstm", use_lr_scheduler=False,
+                      use_xavier_init=False)
+        assert not torch.all(gan.G.out_reg.bias == 0)
+
+    def test_training_works_after_init(self):
+        X = torch.randn(16, 8, 10)
+        y = torch.randn(16)
+        dl = DataLoader(TensorDataset(X, y), batch_size=8)
+        gan = WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                      generator_type="tst", d_model=32, nhead=2,
+                      num_layers_tst=1, critic_steps=1,
+                      use_lr_scheduler=False, use_xavier_init=True)
+        g_loss, d_loss = gan.train_epoch(dl)
+        assert np.isfinite(g_loss) and np.isfinite(d_loss)
+
+
+class TestTriangularLR:
+    def _lrs_over_epochs(self, gan, n):
+        lrs = [gan.opt_g.param_groups[0]["lr"]]
+        for _ in range(n):
+            gan.step_schedulers()
+            lrs.append(gan.opt_g.param_groups[0]["lr"])
+        return lrs
+
+    def test_triangular_cycle(self):
+        """LR starts at min, peaks at max mid-cycle, returns to min."""
+        lr_g, factor = 1e-3, 0.1
+        gan = WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                      generator_type="lstm", use_lr_scheduler=True,
+                      lr_scheduler_type="triangular", lr_cycle_length=4,
+                      n_epochs=8, lr_g=lr_g, lr_scheduler_min_factor=factor)
+        base = lr_g * factor
+        lrs = self._lrs_over_epochs(gan, 8)
+        assert abs(lrs[0] - base) < 1e-12, "cycle must start at min lr"
+        assert abs(lrs[2] - lr_g) < 1e-12, "cycle must peak at max lr"
+        assert abs(lrs[4] - base) < 1e-12, "cycle must return to min lr"
+        assert max(lrs) <= lr_g + 1e-12
+        assert min(lrs) >= base - 1e-12
+
+    def test_cosine_is_default(self):
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        gan = WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                      generator_type="lstm", use_lr_scheduler=True, n_epochs=10)
+        assert isinstance(gan.sched_g, CosineAnnealingLR)
+
+    def test_unknown_type_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="lr_scheduler_type"):
+            WGAN_GP(input_size=10, seq_len=8, hidden_size=32,
+                    generator_type="lstm", use_lr_scheduler=True,
+                    lr_scheduler_type="bogus", n_epochs=10)
+
+
+class TestMHGAN:
+    def _make_gan(self, gen_type="lstm", F=10, T=8):
+        return WGAN_GP(input_size=F, seq_len=T, hidden_size=32,
+                       generator_type=gen_type, d_model=32, nhead=2,
+                       num_layers_tst=1, critic_steps=1,
+                       num_quantiles=3, use_lr_scheduler=False)
+
+    def test_output_shapes(self):
+        for gen_type in ["lstm", "tst"]:
+            gan = self._make_gan(gen_type)
+            xb = torch.randn(4, 8, 10)
+            y_reg, y_logit, y_q = gan.predict_mhgan(xb, k=8)
+            assert y_reg.shape == (4,), f"y_reg shape wrong for {gen_type}"
+            assert y_logit.shape == (4,)
+            assert y_q.shape == (4, 3)
+            assert torch.isfinite(y_reg).all()
+            assert torch.isfinite(y_q).all()
+
+    def test_k_equals_one(self):
+        """k=1 degenerates to a single stochastic sample -- must not crash."""
+        gan = self._make_gan()
+        xb = torch.randn(2, 8, 10)
+        y_reg, _, _ = gan.predict_mhgan(xb, k=1)
+        assert y_reg.shape == (2,)
+
+    def test_single_input(self):
+        gan = self._make_gan()
+        xb = torch.randn(1, 8, 10)
+        y_reg, y_logit, y_q = gan.predict_mhgan(xb, k=4)
+        assert y_reg.shape == (1,)
+        assert y_q.shape == (1, 3)
+
+    def test_evaluate_model_with_mhgan(self):
+        """evaluate_model routes through predict_mhgan when use_mhgan=True."""
+        from src.train import evaluate_model
+        gan = self._make_gan()
+        Xte = np.random.randn(6, 8, 10).astype("float32")
+        yte = np.random.randn(6).astype("float32")
+        yp, yl, yq = evaluate_model(gan, Xte, yte, batch=4, use_mhgan=True, mhgan_k=4)
+        assert yp.shape == (6,)
+        assert yq.shape == (6, 3)
+        assert np.isfinite(yp).all()
