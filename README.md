@@ -8,7 +8,7 @@ Based on the ideas of [Boris Banushev](https://github.com/borisbanushev/stockpre
 ## Features
 
 ### Data & Feature Engineering
-- **40+ correlated assets** via Yahoo Finance: peers (JPM, BAC, MS, C, WFC...), indices (S&P 500, DJIA, NASDAQ, Russell 2000, FTSE, Nikkei, Hang Seng, DAX...), currencies (EUR/USD, GBP/USD, USD/JPY...), commodities (gold, silver, oil, gas), volatility (VIX), bonds (TNX, TLT)
+- **40+ correlated assets** via Yahoo Finance: peers (JPM, BAC, MS, C, WFC...), indices (S&P 500, DJIA, NASDAQ, NYSE Composite, Russell 2000, FTSE, Nikkei, Hang Seng, DAX...), currencies (EUR/USD, GBP/USD, USD/JPY...), commodities (gold, silver, oil, gas), volatility (VIX), rates & bonds (TNX, IRX 13-week T-bill, TLT)
 - **13 technical indicators**: SMA(7/21), EMA(21), MACD + Signal + Histogram, Bollinger Bands (upper/mid/lower), RSI(14), Momentum(10), Log Momentum(10)
 - **Multi-Fourier** (k=3, 6, 9): trend decomposition into long-, medium-, and short-term components
 - **ARIMA(5,1,0)**: in-sample approximation as an extra feature
@@ -95,6 +95,8 @@ stockpredictionai-pro/
 │   ├── run_block_e.py         # Momentum-Trend strategy backtest (+ _wf, _combined)
 │   └── konkop_analysis.py     # Strategy trade analysis
 ├── tests/                     # 294 pytest tests (unit + integration)
+├── docs/
+│   └── experiments.md         # Experiment log (benchmarks, ablations, conclusions)
 ├── outputs/                   # Run artifacts (generated, not tracked in git)
 ├── requirements.txt
 └── README.md
@@ -167,6 +169,8 @@ python -m src.train --ticker GS --start 2010-01-01 --end 2018-12-31 --mhgan --mh
 
 ```bash
 python scripts/optuna_tune.py --ticker GS --start 2010-01-01 --end 2018-12-31 --trials 50
+# Bayesian optimization with Gaussian processes (as in the source notebook):
+python scripts/optuna_tune.py --ticker GS --start 2010-01-01 --end 2018-12-31 --trials 50 --sampler gp
 ```
 
 ### Feature Importance (XGBoost)
