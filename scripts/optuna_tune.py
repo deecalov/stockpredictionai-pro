@@ -98,6 +98,11 @@ def main():
                         help='M1, M3, M5, M7, M14, M30, H1, H4, D1, or tick')
     parser.add_argument('--data_path', default='')
     parser.add_argument('--raw_source', default='m1', choices=['m1', 'ticks'])
+    parser.add_argument('--sampler', default='tpe', choices=['tpe', 'gp', 'random'],
+                        help='Optuna sampler: tpe (default), gp (Gaussian process, '
+                             'Bayesian optimization as in the source notebook), random')
+    parser.add_argument('--panel_csv', default='',
+                        help='Load panel from a cached CSV instead of downloading')
     args = parser.parse_args()
 
     cfg_base = Config(
@@ -111,9 +116,23 @@ def main():
 
     print(f"Loading data panel for {args.ticker} "
           f"(source={cfg_base.data_source}, tf={cfg_base.timeframe})...")
-    panel = build_panel_auto(cfg_base)
+    if args.panel_csv:
+        import pandas as pd
+        panel = pd.read_csv(args.panel_csv, index_col=0, parse_dates=True)
+    else:
+        panel = build_panel_auto(cfg_base)
 
-    study = optuna.create_study(direction="minimize", study_name="stock_gan_tune")
+    if args.sampler == "gp":
+        if not hasattr(optuna.samplers, "GPSampler"):
+            raise SystemExit("GPSampler requires optuna >= 3.6 (pip install -U optuna)")
+        sampler = optuna.samplers.GPSampler(seed=42)
+    elif args.sampler == "random":
+        sampler = optuna.samplers.RandomSampler(seed=42)
+    else:
+        sampler = optuna.samplers.TPESampler(seed=42)
+
+    study = optuna.create_study(direction="minimize", study_name="stock_gan_tune",
+                                sampler=sampler)
     study.optimize(
         lambda trial: objective(trial, panel, cfg_base),
         n_trials=args.trials,

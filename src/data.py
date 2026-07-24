@@ -10,13 +10,15 @@ DEFAULT_CORRELATED = [
     # --- Sector ETFs ---
     "SPY", "XLF", "XLK", "XLE", "XLI",
     # --- US Indices ---
-    "^GSPC", "^DJI", "^IXIC", "^RUT",
+    "^GSPC", "^DJI", "^IXIC", "^RUT", "^NYA",
     # --- Global Indices ---
     "^FTSE", "^N225", "^HSI", "^BSESN", "^GDAXI", "^FCHI",
     # --- Volatility ---
     "^VIX",
     # --- Fixed Income / Rates ---
-    "^TNX", "^TYX", "^FVX", "TLT", "SHY", "IEF",
+    # ^IRX (13-week T-bill) is the short-rate proxy: Yahoo has no SOFR series
+    # and LIBOR (used in the source notebook) was discontinued in 2023
+    "^TNX", "^TYX", "^FVX", "^IRX", "TLT", "SHY", "IEF",
     # --- Currencies ---
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X", "USDCAD=X",
     # --- Commodities ---
@@ -32,7 +34,7 @@ def download_prices(tickers, start, end):
     Tickers that fail to download are silently dropped.
     """
     data = yf.download(tickers, start=start, end=end, auto_adjust=True,
-                       progress=False, threads=False)
+                       progress=False, threads=False, timeout=30)
 
     if data.empty:
         raise RuntimeError(f"yfinance returned empty DataFrame for tickers={tickers}")

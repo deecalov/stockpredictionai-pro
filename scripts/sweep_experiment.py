@@ -5,6 +5,8 @@ Usage:
     python scripts/sweep_experiment.py --sweep lr --values "5e-4,5e-5" "1e-3,1e-4"
     python scripts/sweep_experiment.py --sweep loss_weights --values "1.0,0.4,0.2,0.3" "1.0,1.0,0.2,0.3"
     python scripts/sweep_experiment.py --sweep ablation --values full no_fourier no_ae no_pca no_corr no_indicators
+    python scripts/sweep_experiment.py --sweep ae_variant --values none stacked vae
+    python scripts/sweep_experiment.py --sweep lr_scheduler --values cosine triangular none
 """
 import argparse
 import csv
@@ -12,6 +14,8 @@ import os
 import sys
 import time
 import traceback
+
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -141,7 +145,8 @@ def main():
     parser.add_argument("--cls_threshold", type=float, default=0.0,
                         help="Classification threshold for flat class")
     parser.add_argument("--sweep", required=True,
-                        choices=["seq_len", "lr", "loss_weights", "ablation"],
+                        choices=["seq_len", "lr", "loss_weights", "ablation",
+                                 "ae_variant", "lr_scheduler"],
                         help="Parameter to sweep")
     parser.add_argument("--values", nargs="+", required=True,
                         help="Values to try.")
@@ -152,13 +157,18 @@ def main():
     parser.add_argument("--lr_d", type=float, default=None,
                         help="Override lr_d (discriminator learning rate)")
     parser.add_argument("--output", default="outputs/experiments/sweep_results.csv")
+    parser.add_argument("--panel_csv", default="",
+                        help="Load panel from a cached CSV instead of downloading")
     args = parser.parse_args()
 
     cfg_base = _make_cfg(args)
 
     print(f"Loading panel for {args.ticker} ({args.data_source}, {args.timeframe})...")
     t_load = time.time()
-    panel = build_panel_auto(cfg_base)
+    if args.panel_csv:
+        panel = pd.read_csv(args.panel_csv, index_col=0, parse_dates=True)
+    else:
+        panel = build_panel_auto(cfg_base)
     print(f"Panel loaded: {panel.shape} in {time.time()-t_load:.1f}s")
 
     _log_device_info()
@@ -189,6 +199,22 @@ def main():
         elif args.sweep == "ablation":
             ablation_mode = val
             exp_name = f"abl_{val}"
+
+        elif args.sweep == "ae_variant":
+            # none = autoencoder off (current default); stacked/vae = AE on
+            if val == "none":
+                cfg.ae_epochs = 0
+            else:
+                cfg.ae_epochs = 10
+                cfg.ae_variant = val
+            exp_name = f"ae_{val}"
+
+        elif args.sweep == "lr_scheduler":
+            if val == "none":
+                cfg.use_lr_scheduler = False
+            else:
+                cfg.lr_scheduler_type = val
+            exp_name = f"lrsched_{val}"
 
         try:
             met = run_experiment(panel, cfg, exp_name, ablation_mode=ablation_mode)
